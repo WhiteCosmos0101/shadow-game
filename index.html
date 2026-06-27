@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🌌 影子與母親 - 多人線上連線版</title>
-    <!-- 引入官方高相容、免後端設定的 Pusher 即時連線 SDK -->
-    <script src="https://pusher.com"></script>
+    <title>🌌 影子與母親 - P2P極速連線版</title>
+    <!-- 引入最穩定的原生 P2P 直連 SDK -->
+    <script src="https://unpkg.com"></script>
     <style>
         :root { --bg: #0d1117; --text: #c9d1d9; --accent: #58a6ff; --card: #161b22; }
         body { font-family: sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 15px; display: flex; flex-direction: column; align-items: center; }
@@ -67,8 +67,7 @@
 </div>
 
 <script>
-    // 終極修復：採用免伺服器中轉、無跨域阻擋故障的 Pusher 專用即時信道（已開啟 P2P 客戶端直接同步授權）
-    let pusher = null, channel = null;
+    let peer = null, connections = [];
     let roomCode = "", myName = "", myPlayerId = null, isHost = false, localRoomData = null;
     const rolesPool = ['母親', '影子', '蛋', '獵人', '偵探', '警察', '平民', '平民', '平民', '平民'];
 
@@ -81,104 +80,91 @@
         myName = document.getElementById('input-name').value.trim();
         if (!roomCode || !myName) { alert("請填寫房號與暱稱！"); return; }
 
-        setStatus("正在建立跨國即時雲端軌道...");
+        setStatus("正在啟動 P2P 端對端連線核心...");
 
-        // 初始化一組高頻穩定的專屬連線通道群組
-        pusher = new Pusher("b5db2be70da72c5108c9", { cluster: "ap3", forceTLS: true });
+        // 房長專屬 ID 命名規則：shadow-room-XXXX
+        let hostPeerId = 'shadow-room-' + roomCode;
+
+        // 嘗試以「加入者」身份連線房長
+        peer = new Peer();
         
-        // 注意：為了能在沒有後端伺服器的情況下直接跨網頁廣播，必須使用雙向的 public- 通道
-        channel = pusher.subscribe('public-room-' + roomCode);
-
-        // 監聽數據同步廣播
-        channel.bind('sync_state', function(data) {
-            handleRoomUpdate(data);
-        });
-
-        // 監聽加入申請
-        channel.bind('join_request', function(data) {
-            if (!isHost || !localRoomData) return;
-            let pList = Object.values(localRoomData.players);
-            if (pList.length >= 10 || localRoomData.status !== 'waiting') return;
+        peer.on('open', function(id) {
+            setStatus("P2P 節點建立成功！正在偵測房長...");
             
-            let isExist = pList.some(function(x) { return x.name === data.name; });
-            if (isExist) { broadcastState(); return; }
+            // 嘗試連線房長
+            let conn = peer.connect(hostPeerId);
+            
+            conn.on('open', function() {
+                // 成功連上房長，代表自己是普通玩家
+                setStatus("成功連線房長！正在發送加入申請...");
+                conn.send({ type: 'join', name: myName });
+            });
 
-            let newId = pList.length + 1;
-            localRoomData.players[newId] = { id: newId, name: data.name, role: '未分發', currentRole: '未分發', isAlive: true };
-            localRoomData.logs.push("👥 [" + data.name + "] 成功進入連線大廳。");
-            broadcastState();
+            conn.on('data', function(data) {
+                if (data.type === 'sync') {
+                    handleRoomUpdate(data.state);
+                }
+            });
+
+            // 房長判定兜底：如果 1.2 秒內連不上房長，代表此房間還不存在，自己成為房長
+            setTimeout(function() {
+                if (!localRoomData) {
+                    conn.close();
+                    peer.destroy();
+                    
+                    // 重新以房長的 hostPeerId 啟動節點
+                    isHost = true;
+                    myPlayerId = 1;
+                    peer = new Peer(hostPeerId);
+                    
+                    peer.on('open', function() {
+                        localRoomData = {
+                            status: 'waiting',
+                            currentDay: 0,
+                            isNight: true,
+                            players: { 1: { id: 1, name: myName, role: '未分發', currentRole: '未分發', isAlive: true } },
+                            logs: ["🏠 房間 " + roomCode + " 的等待大廳建立成功！"]
+                        };
+                        setStatus("你是房長，房間已成功建立！");
+                        handleRoomUpdate(localRoomData);
+                    });
+
+                    peer.on('connection', function(newConn) {
+                        newConn.on('data', function(data) {
+                            if (data.type === 'join') {
+                                let pList = Object.values(localRoomData.players);
+                                if (pList.length >= 10 || localRoomData.status !== 'waiting') return;
+                                if (pList.some(x => x.name === data.name)) return;
+
+                                let newId = pList.length + 1;
+                                localRoomData.players[newId] = { id: newId, name: data.name, role: '未分發', currentRole: '未分發', isAlive: true };
+                                localRoomData.logs.push("👥 [" + data.name + "] 成功進入連線大廳。");
+                                
+                                if (!connections.includes(newConn)) connections.push(newConn);
+                                broadcastState();
+                            }
+                        });
+                    });
+                }
+            }, 1200);
         });
-
-        setStatus("成功建立通道！正在確認您是否為房長...");
-
-        // 房長判定：如果發射請求後 900 毫秒都沒有收到任何已有房間的同步數據，自己自動升格為房長
-        setTimeout(function() {
-            if (!localRoomData) {
-                myPlayerId = 1; isHost = true;
-                localRoomData = { 
-                    status: 'waiting', 
-                    currentDay: 0, 
-                    isNight: true, 
-                    players: { 1: { id: 1, name: myName, role: '未分發', currentRole: '未分發', isAlive: true } }, 
-                    logs: ["🏠 房間 " + roomCode + " 的等待大廳建立成功！"] 
-                };
-                setStatus("您已成功建立房間並成為房長！");
-                broadcastState();
-            } else {
-                // 房間已經存在，由雲端軌道向房長發出加入申請
-                channel.trigger('join_request', { name: myName });
-            }
-        }, 900);
-
-        // 防丟包定時器：如果進房後還沒有拿到號碼牌，每 1.5 秒自動重新向頻道內喊話一次
-        setInterval(function() {
-            if (!isHost && !myPlayerId && channel) {
-                // 如果瀏覽器限制了網頁直接 trigger，利用多渠道硬同步機制兜底
-                localStorage.setItem('shadow_join_req_' + roomCode, JSON.stringify({ name: myName, time: Date.now() }));
-                // 同步執行虛擬加入
-                handleLocalStorageRequest();
-            }
-        }, 1500);
-    }
-
-    function handleLocalStorageRequest() {
-        if (!isHost || !localRoomData) return;
-        var reqStr = localStorage.getItem('shadow_join_req_' + roomCode);
-        if (!reqStr) return;
-        var req = JSON.parse(reqStr);
-        let pList = Object.values(localRoomData.players);
-        if (pList.length >= 10 || localRoomData.status !== 'waiting') return;
-        if (pList.some(function(x) { return x.name === req.name; })) return;
-
-        let newId = pList.length + 1;
-        localRoomData.players[newId] = { id: newId, name: req.name, role: '未分發', currentRole: '未分發', isAlive: true };
-        localRoomData.logs.push("👥 [" + req.name + "] 通過本地軌道進入了大廳。");
-        broadcastState();
     }
 
     function broadcastState() {
-        if (localRoomData && roomCode) {
-            // 本地多視窗極速測試：使用本地儲存空間回環同步（解決同一台電腦雙開被瀏覽器擋下的問題）
-            localStorage.setItem('shadow_room_sync_' + roomCode, JSON.stringify(localRoomData));
+        if (isHost && localRoomData) {
+            connections.forEach(conn => {
+                if (conn.open) conn.send({ type: 'sync', state: localRoomData });
+            });
+            handleRoomUpdate(localRoomData);
         }
     }
-
-    // 當同台電腦的不同分頁、不同瀏覽器的儲存空間變更時，自動觸發即時重新整理
-    window.addEventListener('storage', function(e) {
-        if (e.key === 'shadow_room_sync_' + roomCode && e.newValue) {
-            handleRoomUpdate(JSON.parse(e.newValue));
-        }
-        if (e.key === 'shadow_join_req_' + roomCode && isHost) {
-            handleLocalStorageRequest();
-        }
-    });
 
     function handleRoomUpdate(data) {
         localRoomData = data;
         let pList = Object.values(data.players || {});
         
         if (!myPlayerId) {
-            let me = pList.find(function(p) { return p.name === myName; });
+            let me = pList.find(p => p.name === myName);
             if (me) myPlayerId = me.id;
         }
 
@@ -186,7 +172,7 @@
         document.getElementById('view-waiting').classList.remove('hidden');
         document.getElementById('display-room').innerText = roomCode;
         document.getElementById('player-count').innerText = pList.length;
-        setStatus("連線同步中 - 目前大廳共 " + pList.length + " 人已就緒");
+        setStatus("P2P 直連成功 - 大廳共 " + pList.length + " 人已就緒");
 
         var listHtml = "";
         pList.forEach(function(p) {
@@ -228,7 +214,6 @@
         localRoomData.status = 'playing';
         localRoomData.logs.push("⚔️ 所有人到齊！身份已秘密分發，請查看各自手機畫面。");
         broadcastState();
-        localStorage.setItem('shadow_room_sync_' + roomCode, JSON.stringify(localRoomData));
     }
 
     function switchToGame(data) {
@@ -297,7 +282,6 @@
         else { localRoomData.isNight = (targetPhase === 'night'); }
         
         broadcastState();
-        localStorage.setItem('shadow_room_sync_' + roomCode, JSON.stringify(localRoomData));
     }
 </script>
 </body>
