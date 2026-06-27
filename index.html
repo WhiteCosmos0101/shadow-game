@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🌌 影子與母親 - 線上多人連線版</title>
+    <!-- 引入 Supabase 官方實時連線 SDK -->
+    <script src="https://jsdelivr.net"></script>
+    <style>
+        :root { --bg: #0d1117; --text: #c9d1d9; --accent: #58a6ff; --card: #161b22; }
+        body { font-family: sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 15px; display: flex; flex-direction: column; align-items: center; }
+        .container { width: 100%; max-width: 600px; background: var(--card); padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); box-sizing: border-box; }
+        h1, h2, h3 { text-align: center; color: var(--accent); margin-bottom: 5px; }
+        .hidden { display: none !important; }
+        .btn { background-color: #21262d; color: var(--text); border: 1px solid #30363d; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; margin-top: 10px; font-size: 16px; font-weight: bold; }
+        input, select { background-color: #21262d; color: #fff; border: 1px solid #30363d; padding: 12px; border-radius: 6px; width: 100%; font-size: 16px; box-sizing: border-box; margin-bottom: 10px; }
+        .player-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 15px; }
+        .player-card { background: #0d1117; padding: 15px; border-radius: 8px; border: 1px solid #30363d; text-align: center; }
+        .player-card.dead { opacity: 0.4; background: #221111; }
+        .badge { display: inline-block; padding: 2px 6px; font-size: 12px; border-radius: 4px; font-weight: bold; margin-top: 5px; }
+        .badge-alive { background: #238636; color: white; }
+        .badge-dead { background: #da3633; color: white; }
+        .role-display { font-size: 20px; color: #ffad33; font-weight: bold; background: #010409; padding: 15px; border-radius: 8px; text-align: center; margin: 15px 0; border: 1px solid #ffad33; }
+        .log-box { background: #010409; padding: 12px; border-radius: 6px; height: 120px; overflow-y: auto; font-family: monospace; font-size: 13px; margin-top: 15px; border: 1px solid #30363d; }
+        .status-tip { background: #21262d; color: #ffad33; padding: 10px; text-align: center; border-radius: 6px; font-size: 14px; margin-bottom: 10px; border-left: 4px solid #ffad33; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🌌 影子與母親</h1>
+    
+    <!-- 實時狀態提示欄 -->
+    <div id="connect-status" class="status-tip">📡 系統狀態：等待玩家輸入房間號碼...</div>
+
+    <!-- 階段一：大廳連線 -->
+    <div id="view-lobby">
+        <input type="text" id="input-room" placeholder="請輸入 4 位數房間號碼 (如: 7777)">
+        <input type="text" id="input-name" placeholder="請輸入你的暱稱">
+        <button class="btn" style="background:#238636; color:white;" onclick="connectRoom()">🚪 點擊進入/建立房間</button>
+    </div>
+
+    <!-- 階段二：等待大廳 -->
+    <div id="view-waiting" class="hidden">
+        <h3>房間號碼: <span id="display-room" style="color:var(--accent);"></span></h3>
+        <p style="text-align:center; font-weight:bold; font-size:18px;">👥 目前大廳連線玩家 (<span id="player-count">0</span>/10):</p>
+        <div id="waiting-list" style="background:#0d1117; padding:15px; border-radius:8px; min-height:80px; border:1px solid #30363d; line-height: 1.8;"></div>
+        
+        <button id="btn-start" class="btn hidden" style="background:#8b5cf6; color:white;" onclick="startGameHost()">🎲 發牌開局</button>
+        <p id="host-tip" style="font-size:13px; text-align:center; color:#8b949e; margin-top:10px;"></p>
+    </div>
+
+    <!-- 階段三：戰場面板 -->
+    <div id="view-game" class="hidden">
+        <h2 id="display-phase" style="color:#ffad33;">第 0 天 - 🌙 夜晚</h2>
+        <div class="role-display">你的秘密身份是：<br><span id="my-role">分配中...</span></div>
+        
+        <div id="host-panel" class="hidden" style="background:#21262d; padding:15px; border-radius:8px; border:1px solid #58a6ff; margin-bottom:15px;">
+            <h4 style="margin:0 0 10px 0; color:#58a6ff;">👑 房長法官控制台</h4>
+            <div id="host-controls"></div>
+        </div>
+        
+        <h3>👥 戰場玩家狀態</h3>
+        <div class="player-grid" id="game-player-grid"></div>
+        <h3>📜 戰局日誌</h3>
+        <div class="log-box" id="game-log"></div>
+    </div>
+</div>
+
+<script>
+    // 初始化獨立且高頻穩定的 Supabase 雲端伺服器 (公開公共接口)
+    const SB_URL = "https://supabase.co";
+    const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpzYndkd2J5d292eHRtYnl3ZGZhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTY4ODAwMDAsImV4cCI6MjAyODg4MDAwMH0.ExampleKeyForClientSideConnectionOnly";
+    const supabaseClient = supabase.createClient(SB_URL, SB_KEY);
+
+    let roomCode = "", myName = "", myPlayerId = null, isHost = false, localRoomData = null, gameChannel = null;
+    const rolesPool = ['母親', '影子', '蛋', '獵人', '偵探', '警察', '平民', '平民', '平民', '平民'];
+
+    function setStatus(text) {
+        document.getElementById('connect-status').innerText = "📡 " + text;
+    }
+
+    function connectRoom() {
+        roomCode = document.getElementById('input-room').value.trim();
+        myName = document.getElementById('input-name').value.trim();
+        if (!roomCode || !myName) { alert("請填寫房號與暱稱！"); return; }
+
+        setStatus("正在連接雲端大廳...");
+
+        gameChannel = supabaseClient.channel('room_channel_' + roomCode, {
+            config: { broadcast: { self: true } }
+        });
+
+        gameChannel
+        .on('broadcast', { event: 'sync_state' }, function(payload) {
+            handleRoomUpdate(payload.payload);
+        })
+        .on('broadcast', { event: 'join_request' }, function(payload) {
+            if (!isHost || !localRoomData) return;
+            let pList = Object.values(localRoomData.players);
+            if (pList.length >= 10 || localRoomData.status !== 'waiting') return;
+            
+            let isExist = pList.some(function(x) { return x.name === payload.payload.name; });
+            if (isExist) return;
+
+            let newId = pList.length + 1;
+            localRoomData.players[newId] = { id: newId, name: payload.payload.name, role: '未分發', currentRole: '未分發', isAlive: true };
+            localRoomData.logs.push("👥 [" + payload.payload.name + "] 進入大廳。");
+            broadcastState();
+        })
+        .subscribe(function(status) {
+            if (status === 'SUBSCRIBED') {
+                setStatus("成功進入頻道！正在確認您是否為第一位進房者...");
+                
+                setTimeout(function() {
+                    if (!localRoomData) {
+                        myPlayerId = 1; isHost = true;
+                        localRoomData = { 
+                            status: 'waiting', 
+                            currentDay: 0, 
+                            isNight: true, 
+                            players: { 1: { id: 1, name: myName, role: '未分發', currentRole: '未分發', isAlive: true } }, 
+                            logs: ["🏠 成功建立了房間 " + roomCode + " 的等待大廳。"] 
+                        };
+                        setStatus("您已成為本房房長！");
+                        broadcastState();
+                    } else {
+                        gameChannel.send({ event: 'join_request', payload: { name: myName } });
+                    }
+                }, 800);
+            } else {
+                setStatus("🔴 連線失敗，請檢查網路或更換房間號碼！");
+            }
+        });
+    }
+
+    function broadcastState() {
+        if (gameChannel && localRoomData) {
+            gameChannel.send({ event: 'sync_state', payload: localRoomData });
+        }
+    }
+
+    function handleRoomUpdate(data) {
+        localRoomData = data;
+        let pList = Object.values(data.players || {});
+        
+        if (!myPlayerId) {
+            let me = pList.find(function(p) { return p.name === myName; });
+            if (me) myPlayerId = me.id;
+        }
+
+        document.getElementById('view-lobby').classList.add('hidden');
+        document.getElementById('view-waiting').classList.remove('hidden');
+        document.getElementById('display-room').innerText = roomCode;
+        document.getElementById('player-count').innerText = pList.length;
+        setStatus("連線同步中 - 目前大廳內共 " + pList.length + " 人");
+
+        var listHtml = "";
+        pList.forEach(function(p) {
+            var isMeTag = (p.id === myPlayerId) ? " <span style='color:#58a6ff;'>(你)</span>" : "";
+            var isHostTag = (p.id === 1) ? " 👑[房長]" : "";
+            listHtml += "<div>🟢 <b>" + p.id + "號位：</b>" + p.name + isHostTag + isMeTag + "</div>";
+        });
+        document.getElementById('waiting-list').innerHTML = listHtml;
+
+        if (isHost) {
+            document.getElementById('btn-start').classList.remove('hidden');
+            if (pList.length < 10) {
+                document.getElementById('btn-start').innerText = "🎲 目前共 " + pList.length + " 人，用 AI 補滿並開局";
+                document.getElementById('host-tip').innerText = "💡 房長提示：目前人數不足 10 人。點擊上方按鈕，系統會自動加入 AI 填補空缺並直接開局。";
+            } else {
+                document.getElementById('btn-start').innerText = "🎲 10人已到齊，發牌開局";
+                document.getElementById('host-tip').innerText = "💡 房長提示：人數已滿，點擊按鈕即刻為全場發牌。";
+            }
+        } else {
+            document.getElementById('host-tip').innerText = "✨ 已進入連線大廳，正在等待房長發牌或使用 AI 填補空缺開局...";
+        }
+
+        if (data.status === 'playing') switchToGame(data);
+    }
+
+    function startGameHost() {
+        let pList = Object.values(localRoomData.players);
+        if (pList.length < 10) {
+            let startNum = pList.length + 1;
+            for (let i = startNum; i <= 10; i++) {
+                localRoomData.players[i] = { id: i, name: "測試AI_" + i, role: '未分發', currentRole: '未分發', isAlive: true };
+                localRoomData.logs.push("🤖 座位 " + i + " 號已由系統自動用【測試AI】填補空缺。");
+            }
+        }
+        let shuffled = rolesPool.slice().sort(function() { return Math.random() - 0.5; });
+        Object.keys(localRoomData.players).forEach(function(id, idx) {
+            localRoomData.players[id].role = shuffled[idx];
+            localRoomData.players[id].currentRole = shuffled[idx];
+        });
+        localRoomData.status = 'playing';
+        localRoomData.logs.push("⚔️ 所有人到齊！身份已由雲端秘密分發，請查看各自手機畫面。");
+        broadcastState();
+    }
+
+    function switchToGame(data) {
+        document.getElementById('view-waiting').classList.add('hidden');
+        document.getElementById('view-game').classList.remove('hidden');
+        setStatus("遊戲進行中 - 目前為 " + (data.isNight ? '🌙 夜晚' : '☀️ 白天'));
+        
+        let myInfo = data.players[myPlayerId];
+        document.getElementById('my-role').innerText = myInfo ? myInfo.role : "旁觀者";
+        document.getElementById('display-phase').innerText = "第 " + data.currentDay + " 天 - " + (data.isNight ? '🌙 夜晚' : '☀️ 白天');
+        
+        var logHtml = "";
+        data.logs.forEach(function(l) { logHtml += "<div>" + l + "</div>"; });
+        document.getElementById('game-log').innerHTML = logHtml;
+        document.getElementById('game-log').scrollTop = document.getElementById('game-log').scrollHeight;
+
+        let grid = document.getElementById('game-player-grid'); grid.innerHTML = "";
+        Object.values(data.players).forEach(function(p) {
+            let showRole = p.isAlive ? ((p.id === myPlayerId || isHost) ? p.currentRole : "???") : "已淘汰";
+            grid.innerHTML += "<div class='player-card " + (p.isAlive?'':'dead') + "'><b>" + p.id + "號 " + p.name + "</b><div style='color:var(--accent); font-size:14px;'>" + showRole + "</div><span class='badge " + (p.isAlive?'badge-alive':'badge-dead') + "'>" + (p.isAlive?'存活':'死亡') + "</span></div>";
+        });
+
+        if (isHost) {
+            document.getElementById('host-panel').classList.remove('hidden');
+            renderHostControls(data);
+        }
+    }
+
+    function renderHostControls(data) {
+        let ctrlDiv = document.getElementById('host-controls');
+        var selectHtml = "";
+        if (data.isNight) {
+            selectHtml += "<p>🌙 昨晚誰遭遇不幸？</p><select id='select-night-kill'><option value='none'>-- 平安夜 --</option>";
+            Object.values(data.players).forEach(function(p) {
+                if (p.isAlive) selectHtml += "<option value='" + p.id + "'>" + p.id + "號 - " + p.name + "</option>";
+            });
+            selectHtml += "</select><button class='btn' style='background:#238636; color:white; margin-top:5px;' onclick='hostNextPhase(\"day\")'>☀️ 結算並天亮</button>";
+            ctrlDiv.innerHTML = selectHtml;
+        } else {
+            selectHtml += "<p>☀️ 討論結束，今天投票處決誰？</p><select id='select-day-vote'><option value='none'>-- 棄票 --</option>";
+            Object.values(data.players).forEach(function(p) {
+                if (p.isAlive) selectHtml += "<option value='" + p.id + "'>" + p.id + "號 - " + p.name + "</option>";
+            });
+            selectHtml += "</select><button class='btn' style='background:#238636; color:white; margin-top:5px;' onclick='hostNextPhase(\"night\")'>🌙 執行處決並入夜</button>";
+            ctrlDiv.innerHTML = selectHtml;
+        }
+    }
+
+    function hostNextPhase(targetPhase) {
+        if (targetPhase === 'day') {
+            let kid = document.getElementById('select-night-kill').value;
+            if (kid !== 'none') { localRoomData.players[kid].isAlive = false; localRoomData.logs.push("☀️ 昨晚 " + kid + "號 [" + localRoomData.players[kid].name + "] 遇害死亡。"); } else { localRoomData.logs.push("☀️ 昨晚平安夜。"); }
+        } else {
+            let vid = document.getElementById('select-day-vote').value;
+            if (vid !== 'none') { localRoomData.players[vid].isAlive = false; localRoomData.logs.push("🗳️ 白天投票處決了：" + vid + "號 [" + localRoomData.players[vid].name + "]。"); }
+            localRoomData.currentDay++;
+        }
+
+        let mObj = null, pKeys = Object.keys(localRoomData.players);
+        for (var i = 0; i < pKeys.length; i++) {
+            if (localRoomData.players[pKeys[i]].role === '母親') { mObj = localRoomData.players[pKeys[i]]; break; }
+        }
+        
+        if (mObj && !mObj.isAlive) { localRoomData.logs.push("🎉 母親已被消滅！【人類陣營獲得全面勝利】！"); }
+        else if (localRoomData.currentDay >= 5) { localRoomData.logs.push("🏆 熬到了第五天！母親成功存活！【影子陣營獲勝】！"); }
+        else { localRoomData.isNight = (targetPhase === 'night'); }
+        
+        broadcastState();
+    }
+</script>
+</body>
+</html>
